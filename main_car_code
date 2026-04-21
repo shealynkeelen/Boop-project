@@ -12,6 +12,7 @@ const int DIR_LATCH = 12;
 
 // ---------------- MOTOR DIRECTIONS ----------------
 const int Move_Forward  = 39;
+const int Move_Backward = 216;
 const int Right_Rotate  = 149;
 const int Left_Rotate   = 106;
 const int Stop          = 0;
@@ -23,10 +24,13 @@ int Speed3 = 110;
 int Speed4 = 110;
 
 // ---------------- ULTRASONIC SENSOR ----------------
-Ultrasonic ultrasonic(A0, A1);   // trig = A0, echo = A1
+Ultrasonic ultrasonic(A0, A1);
 
 // ---------------- LINE SENSOR ----------------
 const int lineSensorPin = A2;
+
+// ---------------- STATE FLAG ----------------
+bool justBackedUp = false;
 
 // ---------------- TUNING VALUES ----------------
 const unsigned long sweepTime = 3000;
@@ -35,6 +39,10 @@ const int minValidDistance = 2;
 const int maxValidDistance = 200;
 const int stopDistance = 15;
 const unsigned long forwardCheckDelay = 10;
+const unsigned long backUpToCenterTime = 2000;
+
+// correction for aiming back at the object
+const unsigned long turnBackCorrection = 180;
 
 // ---------------- MOTOR FUNCTION ----------------
 void Motor(int Dir, int Speed1, int Speed2, int Speed3, int Speed4) {
@@ -51,10 +59,7 @@ void Motor(int Dir, int Speed1, int Speed2, int Speed3, int Speed4) {
 // ---------------- HELPERS ----------------
 int getDistanceCM() {
   int d = ultrasonic.read();
-
-  if (d < minValidDistance || d > maxValidDistance) {
-    return -1;
-  }
+  if (d < minValidDistance || d > maxValidDistance) return -1;
   return d;
 }
 
@@ -78,33 +83,47 @@ void moveForward() {
   Motor(Move_Forward, Speed1, Speed2, Speed3, Speed4);
 }
 
+void moveBackward() {
+  Motor(Move_Backward, Speed1, Speed2, Speed3, Speed4);
+}
+
+// ---------------- BACKUP FUNCTION ----------------
+void backUpAndRestart() {
+  Serial.println("Black line detected. Backing up...");
+
+  stopCar();
+  delay(200);
+
+  moveBackward();
+  delay(backUpToCenterTime);
+
+  stopCar();
+  delay(300);
+
+  justBackedUp = true;
+}
+
+// ---------------- TARGETING ----------------
 void turnToClosestObject(unsigned long bestTime) {
-  unsigned long rightTurnTime = bestTime;
-  unsigned long leftTurnTime = sweepTime - bestTime;
+  Serial.println("Turning LEFT back toward closest object...");
 
-  const unsigned long rightCorrection = 150;
-  const unsigned long leftCorrection = 150;
+  unsigned long turnBackTime = 0;
 
-  Serial.print("Right turn time: ");
-  Serial.println(rightTurnTime);
-
-  Serial.print("Left turn time: ");
-  Serial.println(leftTurnTime);
-
-  if (rightTurnTime <= leftTurnTime) {
-    Serial.println("Turning RIGHT to closest object...");
-    rotateRight();
-    delay(rightTurnTime + rightCorrection);
-  } else {
-    Serial.println("Turning LEFT to closest object...");
-    rotateLeft();
-    delay(leftTurnTime + leftCorrection);
+  if ((sweepTime - bestTime) > turnBackCorrection) {
+    turnBackTime = (sweepTime - bestTime) + turnBackCorrection;
   }
+
+  Serial.print("Turn back time: ");
+  Serial.println(turnBackTime);
+
+  rotateLeft();
+  delay(turnBackTime);
 
   stopCar();
   delay(500);
 }
 
+// ---------------- SETUP ----------------
 void setup() {
   pinMode(DIR_CLK, OUTPUT);
   pinMode(DATA, OUTPUT);
@@ -125,32 +144,38 @@ void setup() {
   delay(1000);
 }
 
+// ---------------- MAIN LOOP ----------------
 void loop() {
   int closestDistance = 9999;
   unsigned long bestTime = 0;
 
-  moveForward();
-  delay(2000);
-  stopCar();
-  delay(300);
+  // ONLY move forward if we didn't just back up
+  if (!justBackedUp) {
+    moveForward();
+    delay(2000);
+    stopCar();
+    delay(300);
+  } else {
+    Serial.println("Skipping forward move (just backed up)");
+    justBackedUp = false;
+  }
 
+  // -------- SCAN --------
   unsigned long startTime = millis();
   Serial.println("Starting 360 sweep...");
   rotateRight();
 
   while (millis() - startTime < sweepTime) {
     if (blackLineDetected()) {
-      Serial.println("Black line detected during sweep. Stopping.");
-      stopCar();
-      while (true) { }
+      backUpAndRestart();
+      return;
     }
 
     int distance = getDistanceCM();
 
     if (distance != -1) {
       Serial.print("Sweep distance: ");
-      Serial.print(distance);
-      Serial.println(" cm");
+      Serial.println(distance);
 
       if (distance < closestDistance) {
         closestDistance = distance;
@@ -170,7 +195,7 @@ void loop() {
     return;
   }
 
-  Serial.print("Closest distance found: ");
+  Serial.print("Closest distance: ");
   Serial.println(closestDistance);
 
   Serial.print("Best time: ");
@@ -178,21 +203,19 @@ void loop() {
 
   turnToClosestObject(bestTime);
 
+  // -------- MOVE TO OBJECT --------
   Serial.println("Moving toward object...");
 
   while (true) {
     if (blackLineDetected()) {
-      Serial.println("Black line detected. Stopping before crossing.");
-      stopCar();
-      while (true) { }
+      backUpAndRestart();
+      return;
     }
 
     int distance = getDistanceCM();
 
     Serial.print("Live distance: ");
-    Serial.print(distance);
-    Serial.println(" cm");
-
+    Serial.println(distance);
 
     moveForward();
     delay(forwardCheckDelay);
